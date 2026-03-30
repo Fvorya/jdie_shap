@@ -1,0 +1,22 @@
+{
+  "n_low": {
+    "action_name": "Urea Application",
+    "concentration_pct": 46,
+    "price_per_kg": 7000
+  },
+  "p_low": {
+    "action_name": "SP-36 Application",
+    "concentration_pct": 36,
+    "price_per_kg": 6000
+  },
+  "k_low": {
+    "action_name": "KCL Application",
+    "concentration_pct": 60,
+    "price_per_kg": 8000
+  },
+  "ph_low": {
+    "action_name": "Dolomite Application",
+    "concentration_pct": 100,
+    "price_per_kg": 1500
+  }
+}
