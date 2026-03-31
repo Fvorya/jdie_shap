@@ -1,20 +1,20 @@
 {
-    "n_low": {
+    "N": {
         "action_name": "Urea Fertilizer Application",
         "concentration_pct": 46.0,
         "price_per_kg": 0.691
     },
-    "p_low": {
+    "P": {
         "action_name": "DAP Fertilizer Application",
         "concentration_pct": 36.0,
         "price_per_kg": 0.693
     },
-    "k_low": {
+    "K": {
         "action_name": "MOP Fertilizer Application",
         "concentration_pct": 60.0,
         "price_per_kg": 0.37
     },
-    "ph_low": {
+    "pH": {
         "action_name": "Dolomite Powder (100 Mesh) Application",
         "concentration_pct": 100.0,
         "price_per_kg": 0.2
