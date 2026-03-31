@@ -1,3 +1,7 @@
+"""
+This program uses AI to assess soil quality and then recommends suitable crops to plant.
+"""
+
 import sys
 import os
 import json
@@ -21,11 +25,12 @@ import io
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QVBoxLayout, QLabel, QComboBox, QPushButton,
                              QGroupBox, QTabWidget, QScrollArea, QButtonGroup,
-                             QFileDialog, QMessageBox, QProgressBar, QDialog, QGridLayout)
+                             QFileDialog, QMessageBox, QProgressBar, QDialog, QGridLayout,
+                             QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtCore import QUrl, Qt, QTimer
 from PyQt5.QtPrintSupport import QPrinter
-from PyQt5.QtGui import QTextDocument
+from PyQt5.QtGui import QTextDocument, QColor
 
 # ==========================================
 # 1. PARAMETER CONFIGURATION (WARNA DISERAGAMKAN HIJAU = AMAN, MERAH = BAHAYA)
@@ -48,7 +53,8 @@ NAMA_FILE_ENCODER = 'model/label_encoder.joblib'
 NAMA_FILE_CSV = 'model/Crop_recommendation.csv'
 TEMP_HTML = '/tmp/temp_dashboard_map.html'
 FILE_OVERLAY = '/tmp/overlay_dynamic.png'
-NAMA_FILE_COMMODITY = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'commodity_prices.json')
+NAMA_FILE_COMMODITY = os.path.join(os.path.dirname(
+    os.path.abspath(__file__)), 'commodity_prices.json')
 # ==========================================
 # DIALOG PEMILIHAN TANAMAN (TOUCHSCREEN FRIENDLY)
 # ==========================================
@@ -114,6 +120,209 @@ class CropSelectionDialog(QDialog):
         self.selected_crop = crop_name
         self.accept()
 
+
+class CommodityEditorDialog(QDialog):
+    def __init__(self, json_path, parent=None):
+        super().__init__(parent)
+        self.json_path = json_path
+        self.setWindowTitle("Edit Commodity Prices")
+        self.setStyleSheet("background-color: #0F172A; color: white;")
+        self.setFixedSize(800, 400)
+
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel("COMMODITY PRICES EDITOR", self)
+        lbl.setStyleSheet(
+            "font-size: 18px; font-weight: bold; color: #0ea5e9; padding-bottom: 10px;")
+        lbl.setAlignment(Qt.AlignCenter)
+        layout.addWidget(lbl)
+
+        # Konfigurasi Tabel dengan urutan kolom baru
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        # Urutan: Key -> Action Name -> Concentration -> Price
+        self.table.setHorizontalHeaderLabels([
+            "Item Key",
+            "Action Name",
+            "Concentration (%)",
+            "Price per Kg"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setStyleSheet("""
+            QTableWidget { background-color: #1E293B; color: white; gridline-color: #334155; border: 1px solid #334155; border-radius: 6px; }
+            QHeaderView::section { background-color: #0F172A; color: #0ea5e9; font-weight: bold; padding: 8px; border: 1px solid #334155; }
+            QTableWidget::item { padding: 5px; }
+        """)
+        layout.addWidget(self.table)
+
+        self.load_data()
+
+        # Tombol Action
+        btn_layout = QHBoxLayout()
+        btn_cancel = QPushButton("CANCEL")
+        btn_cancel.setStyleSheet(
+            "background-color: #ef4444; padding: 12px; font-weight: bold; border-radius: 6px; font-size: 14px;")
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_save = QPushButton("SAVE CHANGES")
+        btn_save.setStyleSheet(
+            "background-color: #10b981; padding: 12px; font-weight: bold; border-radius: 6px; font-size: 14px;")
+        btn_save.clicked.connect(self.save_data)
+
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_save)
+        layout.addLayout(btn_layout)
+
+    def load_data(self):
+        try:
+            self.data = {}
+
+            if not os.path.exists(self.json_path):
+                print(f"File not found: {self.json_path}")
+                self._use_default_data()
+                return
+
+            file_size = os.path.getsize(self.json_path)
+            if file_size == 0:
+                print("Empty file")
+                self._use_default_data()
+                return
+
+            # Baca file sebagai text dulu untuk validasi
+            try:
+                with open(self.json_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+            except UnicodeDecodeError:
+                print("File encoding error; using default settings")
+                self._use_default_data()
+                return
+
+            if not content:
+                print("Empty file after stripping")
+                self._use_default_data()
+                return
+
+            # Parse JSON
+            try:
+                self.data = json.loads(content)
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}")
+                print(f"File content preview: {content[:100]}...")
+                self._use_default_data()
+                return
+
+            # Validasi struktur data
+            if not isinstance(self.data, dict):
+                print("Data is not a dictionary")
+                self._use_default_data()
+                return
+
+            print(f"Data loaded successfully: {len(self.data)} items")
+
+        except Exception as e:
+            print(f"Unexpected error in load_data: {e}")
+            self._use_default_data()
+
+        finally:
+            # Pastikan table selalu terisi
+            self._populate_table()
+
+    def _use_default_data(self):
+        """Set default data yang aman"""
+        self.data = {
+            "n_low": {"action_name": "Urea Fertilizer Application", "concentration_pct": 46, "price_per_kg": 0},
+            "p_low": {"action_name": "DAP Fertilizer Application", "concentration_pct": 36, "price_per_kg": 0},
+            "k_low": {"action_name": "MOP Fertilizer Application", "concentration_pct": 60, "price_per_kg": 0},
+            "ph_low": {"action_name": "Dolomite Powder (100 Mesh) Application", "concentration_pct": 100, "price_per_kg": 0}
+        }
+        print("Using default data")
+
+    def _populate_table(self):
+        """Populate table dengan data yang sudah valid"""
+        self.table.setRowCount(0)  # Clear table
+        self.table.setRowCount(len(self.data))
+
+        # Urutan preferred
+        preferred_order = ["n_low", "p_low", "k_low", "ph_low"]
+        all_keys = preferred_order + \
+            [k for k in self.data.keys() if k not in preferred_order]
+
+        for row, key in enumerate(all_keys):
+            if key not in self.data:
+                continue
+
+            values = self.data[key]
+
+            # Column 0: Item Key (Read Only)
+            item_key = QTableWidgetItem(key)
+            item_key.setFlags(item_key.flags() ^ Qt.ItemIsEditable)
+            item_key.setBackground(QColor(64, 64, 64))  # Dark gray
+            self.table.setItem(row, 0, item_key)
+
+            # Column 1: Action Name (Make editable)
+            action_item = QTableWidgetItem(str(values.get('action_name', '')))
+            self.table.setItem(row, 1, action_item)
+
+            # Column 2: Concentration (%)
+            conc_item = QTableWidgetItem(
+                str(values.get('concentration_pct', 0)))
+            self.table.setItem(row, 2, conc_item)
+
+            # Column 3: Price per Kg
+            price_item = QTableWidgetItem(str(values.get('price_per_kg', 0)))
+            self.table.setItem(row, 3, price_item)
+
+        self.table.resizeColumnsToContents()
+
+    def save_data(self):
+        try:
+            new_data = {}
+            for row in range(self.table.rowCount()):
+                if self.table.item(row, 0) is None:
+                    continue
+
+                key_item = self.table.item(row, 0)
+                action_item = self.table.item(row, 1)
+
+                if key_item is None:
+                    continue
+
+                key = key_item.text()
+
+                if (self.table.item(row, 1) is None or
+                    self.table.item(row, 2) is None or
+                        self.table.item(row, 3) is None):
+                    QMessageBox.warning(
+                        self, "Invalid Input", f"Incomplete data in the row {row + 1}")
+                    return
+
+                action_name = action_item.text()
+
+                try:
+                    concentration = float(self.table.item(row, 2).text())
+                    price = float(self.table.item(row, 3).text())
+                except ValueError as ve:
+                    QMessageBox.warning(
+                        self, "Invalid Input", f"Invalid number in the row {key}: {ve}")
+                    return
+
+                new_data[key] = {
+                    "action_name": action_name,
+                    "concentration_pct": concentration,
+                    "price_per_kg": price
+                }
+
+            os.makedirs(os.path.dirname(self.json_path), exist_ok=True)
+
+            with open(self.json_path, 'w', encoding='utf-8') as f:
+                json.dump(new_data, f, indent=4, ensure_ascii=False)
+
+            QMessageBox.information(
+                self, "Success", "The price data has been successfully saved!")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save: {e}")
+
 # ==========================================
 # 2. MAIN GUI APPLICATION CLASS
 # ==========================================
@@ -166,7 +375,7 @@ class AgriWandDashboard(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(5)
 
         # === 1. TOP BAR (Header & Settings) ===
         top_bar = QHBoxLayout()
@@ -179,14 +388,20 @@ class AgriWandDashboard(QMainWindow):
         self.combo_main_file = QComboBox()
         self.combo_main_file.currentIndexChanged.connect(
             self.load_main_from_combo)
-        self.combo_main_file.setMinimumWidth(200)
+        self.combo_main_file.setMinimumWidth(175)
 
         # REVISI 4: Ganti ComboBox Target Tanaman menjadi Tombol Pop-up
         self.btn_target_crop = QPushButton("TARGET: GENERAL")
         self.btn_target_crop.setStyleSheet(
             "background-color: #1E293B; color: #f59e0b; font-weight: bold; padding: 10px; border-radius: 6px; font-size: 14px; border: 1px solid #334155;")
         self.btn_target_crop.clicked.connect(self.show_crop_dialog)
-        self.btn_target_crop.setFixedWidth(200)
+        self.btn_target_crop.setFixedWidth(175)
+
+        # ---> TAMBAHKAN KODE INI <---
+        self.btn_edit_json = QPushButton("EDIT PRICES")
+        self.btn_edit_json.setStyleSheet(
+            "background-color: #8b5cf6; color: white; font-weight: bold; padding: 10px 15px; border-radius: 6px;")
+        self.btn_edit_json.clicked.connect(self.show_price_editor)
 
         # REVISI 2: Hapus Emoji
         self.btn_export = QPushButton("EXPORT PDF")
@@ -196,13 +411,14 @@ class AgriWandDashboard(QMainWindow):
 
         btn_exit = QPushButton("EXIT")
         btn_exit.setStyleSheet(
-            "background-color: #ef4444; color: white; font-weight: bold; padding: 10px 15px; border-radius: 6px;")
+            "background-color: #ef4444; color: white; font-weight: bold; padding: 10px 10px; border-radius: 6px;")
         btn_exit.clicked.connect(self.close)
 
         top_bar.addStretch()
         top_bar.addWidget(QLabel("DATASET:"))
         top_bar.addWidget(self.combo_main_file)
         top_bar.addWidget(self.btn_target_crop)
+        top_bar.addWidget(self.btn_edit_json)
         top_bar.addWidget(self.btn_export)
         top_bar.addWidget(btn_exit)
         main_layout.addLayout(top_bar)
@@ -335,6 +551,10 @@ class AgriWandDashboard(QMainWindow):
                 self.update_map()
             else:
                 self.activate_mode_2()
+
+    def show_price_editor(self):
+        dialog = CommodityEditorDialog(NAMA_FILE_COMMODITY, self)
+        dialog.exec_()
 
     def toggle_map_style(self):
         if self.btn_map_style.isChecked():
@@ -490,7 +710,8 @@ class AgriWandDashboard(QMainWindow):
     def show_shap_analysis(self):
         """Menampilkan SHAP waterfall plot untuk prediksi AI terakhir."""
         if not self.model_ready or not hasattr(self, 'last_input_features'):
-            QMessageBox.warning(self, "SHAP Error", "Run the AI Analysis first.")
+            QMessageBox.warning(self, "SHAP Error",
+                                "Run the AI Analysis first.")
             return
 
         try:
@@ -504,7 +725,8 @@ class AgriWandDashboard(QMainWindow):
             # Tentukan kelas prediksi teratas
             pred_class_idx = int(np.argmax(
                 self.model_ai.predict_proba(self.last_input_features)[0]))
-            pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[0].upper()
+            pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[
+                0].upper()
 
             # Ambil SHAP values untuk kelas terprediksi
             if isinstance(shap_values, list):
@@ -525,16 +747,18 @@ class AgriWandDashboard(QMainWindow):
             colors = ['#ef4444' if v < 0 else '#10b981' for v in sv]
             y_pos = range(len(feature_names))
 
-            bars = ax.barh(y_pos, sv, color=colors, edgecolor='none', height=0.6)
+            bars = ax.barh(y_pos, sv, color=colors,
+                           edgecolor='none', height=0.6)
             ax.set_yticks(list(y_pos))
             ax.set_yticklabels(
-                [f"{n}\n({v:.2f})" for n, v in zip(feature_names, feature_values)],
+                [f"{n}\n({v:.2f})" for n, v in zip(
+                    feature_names, feature_values)],
                 color='white', fontsize=11)
-            
+
             ax.set_xlabel("SHAP Values", color='#94a3b8', fontsize=10)
             ax.set_title(f"SHAP - Feature Contributions to: {pred_crop}",
                          color='#0ea5e9', fontsize=11, fontweight='bold', pad=15)
-            
+
             ax.tick_params(colors='white')
             ax.spines[:].set_color('#334155')
             ax.axvline(0, color='#64748b', linewidth=0.8, linestyle='--')
@@ -546,7 +770,7 @@ class AgriWandDashboard(QMainWindow):
                 offset = 0.005 if x_pos >= 0 else -0.005
                 ax.text(x_pos + offset, bar.get_y() + bar.get_height() / 2,
                         f"{val:+.2f}", va='center', ha=ha, color='white', fontsize=10, fontweight='bold')
-            
+
             # Beri ruang ekstra di kiri & kanan agar tidak tumpang tindih
             x_min, x_max = ax.get_xlim()
             padding = (x_max - x_min) * 0.15  # 15% padding dari total range
@@ -574,7 +798,8 @@ class AgriWandDashboard(QMainWindow):
             dlg_layout = QVBoxLayout(dialog)
 
             lbl_img = QLabel()
-            lbl_img.setPixmap(pixmap.scaled(700, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            lbl_img.setPixmap(pixmap.scaled(
+                700, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             lbl_img.setAlignment(Qt.AlignCenter)
             dlg_layout.addWidget(lbl_img)
 
@@ -595,7 +820,8 @@ class AgriWandDashboard(QMainWindow):
             dialog.exec_()
 
         except Exception as e:
-            QMessageBox.critical(self, "SHAP Error", f"Failed to calculate SHAP values:\n{str(e)}")
+            QMessageBox.critical(self, "SHAP Error",
+                                 f"Failed to calculate SHAP values:\n{str(e)}")
         finally:
             self.btn_shap.setText("SHAP EXPLANATION")
 
@@ -926,7 +1152,7 @@ class AgriWandDashboard(QMainWindow):
                 </div>
             </div>
             """
-            
+
             # ───────────────────────────────────────────
             # HALAMAN 2 — SHAP + Decision Support System
             # ───────────────────────────────────────────
@@ -936,10 +1162,12 @@ class AgriWandDashboard(QMainWindow):
             if hasattr(self, 'last_input_features') and self.model_ready:
                 try:
                     explainer = shap.TreeExplainer(self.model_ai)
-                    shap_values = explainer.shap_values(self.last_input_features)
+                    shap_values = explainer.shap_values(
+                        self.last_input_features)
                     pred_class_idx = int(np.argmax(
                         self.model_ai.predict_proba(self.last_input_features)[0]))
-                    pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[0].upper()
+                    pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[
+                        0].upper()
 
                     if isinstance(shap_values, list):
                         sv = shap_values[pred_class_idx][0]
@@ -956,17 +1184,20 @@ class AgriWandDashboard(QMainWindow):
                     ax.set_facecolor('#1E293B')
                     colors = ['#ef4444' if v < 0 else '#10b981' for v in sv]
                     y_pos = range(len(feature_names))
-                    bars = ax.barh(y_pos, sv, color=colors, edgecolor='none', height=0.6)
+                    bars = ax.barh(y_pos, sv, color=colors,
+                                   edgecolor='none', height=0.6)
                     ax.set_yticks(list(y_pos))
                     ax.set_yticklabels(
-                        [f"{n}  ({v:.2f})" for n, v in zip(feature_names, feature_values)],
+                        [f"{n}  ({v:.2f})" for n, v in zip(
+                            feature_names, feature_values)],
                         color='white', fontsize=10)
                     ax.set_xlabel("SHAP Value", color='#94a3b8', fontsize=9)
                     ax.set_title(f"SHAP - Feature Contributions to: {pred_crop}",
-                                color='#0ea5e9', fontsize=11, fontweight='bold', pad=12)
+                                 color='#0ea5e9', fontsize=11, fontweight='bold', pad=12)
                     ax.tick_params(colors='white')
                     ax.spines[:].set_color('#334155')
-                    ax.axvline(0, color='#64748b', linewidth=0.8, linestyle='--')
+                    ax.axvline(0, color='#64748b',
+                               linewidth=0.8, linestyle='--')
                     for bar, val in zip(bars, sv):
                         x_pos = bar.get_width()
                         ha = 'left' if x_pos >= 0 else 'right'
@@ -985,7 +1216,8 @@ class AgriWandDashboard(QMainWindow):
                     buf_shap.seek(0)
                     plt.close(fig)
 
-                    shap_b64 = base64.b64encode(buf_shap.read()).decode('utf-8')
+                    shap_b64 = base64.b64encode(
+                        buf_shap.read()).decode('utf-8')
                     shap_img_tag = f"<img src='data:image/png;base64,{shap_b64}' width='620'/>"
 
                 except Exception:
@@ -994,42 +1226,44 @@ class AgriWandDashboard(QMainWindow):
             try:
                 with open(NAMA_FILE_COMMODITY, 'r') as f:
                     commodity_data = json.load(f)
-                    print(f"[OK] Loaded {len(commodity_data)} commodity keys: {list(commodity_data.keys())}")
+                    print(
+                        f"[OK] Loaded {len(commodity_data)} commodity keys: {list(commodity_data.keys())}")
             except Exception as e:
-                QMessageBox.warning(self, "Commodity Load Error", 
+                QMessageBox.warning(self, "Commodity Load Error",
                                     f"Failed to read commodity_prices.json:\n{str(e)}\n\nEstimated Cost: N/A")
-                
+
             # 2. Bangun tabel DSS
             def dss_row(param_label, param_key, unit, avg, opt_min, opt_max, low_action, high_action):
                 cost_estimation = "N/A"
-                
+
                 if avg < opt_min:
                     status_color = "#f59e0b"
-                    status_text  = "BELOW OPTIMAL"
-                    action       = low_action
-                    
+                    status_text = "BELOW OPTIMAL"
+                    action = low_action
+
                     json_key = f"{param_key}_low"
                     if json_key in commodity_data:
                         c_data = commodity_data[json_key]
                         deficit_ppm = opt_min - avg
-            
+
                         # Agronomic Math: (Defisit * 2) / (Persentase / 100)
-                        kg_needed = (deficit_ppm * 2) / (c_data['concentration_pct'] / 100)
+                        kg_needed = (deficit_ppm * 2) / \
+                            (c_data['concentration_pct'] / 100)
                         total_cost = kg_needed * c_data['price_per_kg']
-            
-                        cost_estimation = f"Rp {total_cost:,.0f} / ha<br><span style='font-size:8pt; color:#64748b;'>({kg_needed:.1f} kg {c_data['action_name']})</span>"
-                        
+
+                        cost_estimation = f"{total_cost:,.2f} USD / ha<br><span style='font-size:8pt; color:#64748b;'>({kg_needed:.1f} kg {c_data['action_name']})</span>"
+
                 elif avg > opt_max:
                     status_color = "#ef4444"
-                    status_text  = "ABOVE OPTIMAL"
-                    action       = high_action
+                    status_text = "ABOVE OPTIMAL"
+                    action = high_action
                     cost_estimation = "Operating Costs (Irrigation/Drainage)"
                 else:
                     status_color = "#10b981"
-                    status_text  = "OPTIMAL"
-                    action       = "No corrective action needed. Maintain current conditions."
-                    cost_estimation = "Rp 0"
-                    
+                    status_text = "OPTIMAL"
+                    action = "No corrective action needed. Maintain current conditions."
+                    cost_estimation = "0 USD"
+
                 return f"""
                     <tr>
                         <td style="border:1px solid #cbd5e1; padding:7px;"><b>{param_label}</b><br>
@@ -1045,16 +1279,16 @@ class AgriWandDashboard(QMainWindow):
             dss_rows = (
                 dss_row("Nitrogen (N)", "n", "mg/kg", n_avg,
                         PARAM_CONFIG['n']['opt_min'], PARAM_CONFIG['n']['opt_max'],
-                        "Apply nitrogen-rich fertilizer (Urea/ZA). Consider green manure or compost.",
+                        "Apply nitrogen-rich fertilizer like Urea. Consider green manure or compost.",
                         "Reduce nitrogen input. Avoid over-fertilization; risk of leaching & toxicity.") +
                 dss_row("Phosphorus (P)", "p", "mg/kg", p_avg,
                         PARAM_CONFIG['p']['opt_min'], PARAM_CONFIG['p']['opt_max'],
-                        "Apply SP-36 or TSP fertilizer. Add organic matter to improve P availability.",
-                        "Reduce phosphate fertilizer. Excess P can lock out Zinc and Iron uptake.") +
+                        "Apply phosphorus-rich fertilizer like DAP fertilizer. Add organic matter to improve P availability.",
+                        "Reduce phosphate fertilizer. Excess phosphorus can lock out Zinc and Iron uptake.") +
                 dss_row("Potassium (K)", "k", "mg/kg", k_avg,
                         PARAM_CONFIG['k']['opt_min'], PARAM_CONFIG['k']['opt_max'],
-                        "Apply KCl or K2SO4 fertilizer. Potassium deficiency weakens stem and disease resistance.",
-                        "Limit K fertilizer. Excess K interferes with Mg and Ca absorption.") +
+                        "Apply potassium-rich fertilizer like MOP fertilizer. Potassium plays a vital role in stomatal regulation and water efficiency.",
+                        "Limit potassium fertilizer. Excess potassium interferes with Magnesium and Calcium absorption.") +
                 dss_row("Temperature", "temp", "°C", t_avg,
                         PARAM_CONFIG['temp']['opt_min'], PARAM_CONFIG['temp']['opt_max'],
                         "Use mulching or protective covers to retain soil warmth. Consider microclimate management.",
@@ -1065,7 +1299,7 @@ class AgriWandDashboard(QMainWindow):
                         "Improve drainage channels. Reduce irrigation or apply raised bed technique.") +
                 dss_row("Soil pH", "ph", "", ph_avg,
                         PARAM_CONFIG['ph']['opt_min'], PARAM_CONFIG['ph']['opt_max'],
-                        "Apply agricultural lime (CaCO₃) or dolomite to raise pH. Re-test after 4 weeks.",
+                        "Apply dolomite powder to raise pH. Re-test after 4 weeks.",
                         "Apply elemental sulfur or acidifying fertilizer (e.g., Ammonium Sulfate) to lower pH.")
             )
 

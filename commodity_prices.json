@@ -1,22 +1,22 @@
 {
-  "n_low": {
-    "action_name": "Urea Application",
-    "concentration_pct": 46,
-    "price_per_kg": 7000
-  },
-  "p_low": {
-    "action_name": "SP-36 Application",
-    "concentration_pct": 36,
-    "price_per_kg": 6000
-  },
-  "k_low": {
-    "action_name": "KCL Application",
-    "concentration_pct": 60,
-    "price_per_kg": 8000
-  },
-  "ph_low": {
-    "action_name": "Dolomite Application",
-    "concentration_pct": 100,
-    "price_per_kg": 1500
-  }
+    "n_low": {
+        "action_name": "Urea Fertilizer Application",
+        "concentration_pct": 46.0,
+        "price_per_kg": 0.691
+    },
+    "p_low": {
+        "action_name": "DAP Fertilizer Application",
+        "concentration_pct": 36.0,
+        "price_per_kg": 0.693
+    },
+    "k_low": {
+        "action_name": "MOP Fertilizer Application",
+        "concentration_pct": 60.0,
+        "price_per_kg": 0.37
+    },
+    "ph_low": {
+        "action_name": "Dolomite Powder (100 Mesh) Application",
+        "concentration_pct": 100.0,
+        "price_per_kg": 0.2
+    }
 }
