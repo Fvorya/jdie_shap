@@ -19,13 +19,8 @@ import webbrowser
 import requests
 import joblib
 import base64
-import threading
-import http.server
-import socketserver
-import socket
 import qrcode
 from io import BytesIO
-import psutil
 import shap
 import io
 
@@ -64,45 +59,26 @@ NAMA_FILE_COMMODITY = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), 'commodity_prices.json')
 
 
-class ReportServerThread(threading.Thread):
-    def __init__(self, port=8000, directory="report"):
-        super().__init__(daemon=True)
-        self.port = port
-        self.directory = directory
-
-    def run(self):
-        class Handler(http.server.SimpleHTTPRequestHandler):
-            def __init__(self, *args, **kwargs):
-                super().__init__(*args, directory=self.directory, **kwargs)
-            # Menyembunyikan log agar terminal tidak penuh
-
-            def log_message(self, format, *args):
-                pass
-
-        # Memastikan port bisa langsung dipakai ulang jika aplikasi direstart
-        socketserver.TCPServer.allow_reuse_address = True
-        with socketserver.TCPServer(("", self.port), Handler) as httpd:
-            print(f"File server running on port {self.port}")
-            httpd.serve_forever()
-
-
-def get_ap_ip():
+def upload_pdf_to_web(filepath):
     """
-    Mencari IP address berdasarkan nama interface.
-    Ganti 'wlan0' dengan nama interface hotspot kamu.
+    Mengunggah file PDF ke layanan hosting publik (Catbox.moe).
     """
-    interfaces = psutil.net_if_addrs()
+    url = "https://catbox.moe/user/api.php"
+    data = {"reqtype": "fileupload"}
 
-    # Coba cari di wlan0 (umumnya interface wifi/hotspot di Raspi)
-    target_interface = 'wlan0'
+    try:
+        with open(filepath, 'rb') as f:
+            # Mengirim HTTP POST request berisi file
+            response = requests.post(url, data=data, files={'fileToUpload': f})
 
-    if target_interface in interfaces:
-        for addr in interfaces[target_interface]:
-            if addr.family == socket.AF_INET:  # Ambil versi IPv4
-                return addr.address
-
-    # Fallback jika interface tidak ketemu, coba ambil IP apa saja yang aktif
-    return socket.gethostbyname(socket.gethostname())
+        if response.status_code == 200:
+            # Jika sukses, server merespons langsung dengan URL file-nya
+            return response.text
+        else:
+            return None
+    except Exception as e:
+        print(f"Failed to upload the file: {e}")
+        return None
 
 # ==========================================
 # DIALOG PEMILIHAN TANAMAN (TOUCHSCREEN FRIENDLY)
@@ -417,11 +393,6 @@ class AgriWandDashboard(QMainWindow):
         self.init_ui()
         self.init_empty_map()
         self.scan_dataset_folder()
-
-        if not os.path.exists("report"):
-            os.makedirs("report")
-        self.server_thread = ReportServerThread(port=8000, directory="report")
-        self.server_thread.start()
 
         self.ui_ready = True
 
@@ -1421,61 +1392,64 @@ class AgriWandDashboard(QMainWindow):
             doc.setHtml(html_content + page2_html)
             doc.print_(printer)
 
-            ip_address = get_ap_ip()
-            pdf_filename = os.path.basename(path)
-            # URL mengarah ke server lokal port 8000
-            file_url = f"http://{ip_address}:8000/{pdf_filename}"
+            # --- PROSES UPLOAD DAN GENERATE QR ---
+            # Tampilkan pesan loading sementara (karena upload butuh waktu beberapa detik)
+            self.statusBar().showMessage("Uploading a PDF to the web server...")
+            QApplication.processEvents()  # Memaksa UI memperbarui status bar
 
-            # 2. Generate QR Code
-            qr = qrcode.QRCode(version=1, box_size=8, border=2)
-            qr.add_data(file_url)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="#0F172A", back_color="white")
+            # 1. Panggil fungsi upload
+            public_url = upload_pdf_to_web(path)
 
-            # 3. Konversi gambar QR ke format yang bisa dibaca PyQt5
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            qimg = QImage.fromData(buf.getvalue())
-            pixmap = QPixmap.fromImage(qimg)
+            self.statusBar().clearMessage()  # Bersihkan status bar
 
-            # 4. Buat dan tampilkan Custom Dialog
-            qr_dialog = QDialog(self)
-            qr_dialog.setWindowTitle("Report Generated Successfully")
-            qr_dialog.setStyleSheet("background-color: #0F172A; color: white;")
-            qr_layout = QVBoxLayout(qr_dialog)
+            if public_url:
+                # 2. Generate QR Code dari URL Publik
+                qr = qrcode.QRCode(version=1, box_size=8, border=2)
+                qr.add_data(public_url)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="#0F172A", back_color="white")
 
-            lbl_title = QLabel("SCAN TO DOWNLOAD PDF")
-            lbl_title.setStyleSheet(
-                "font-size: 16px; font-weight: bold; color: #10b981;")
-            lbl_title.setAlignment(Qt.AlignCenter)
-            qr_layout.addWidget(lbl_title)
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                qimg = QImage.fromData(buf.getvalue())
+                pixmap = QPixmap.fromImage(qimg)
 
-            lbl_qr = QLabel()
-            lbl_qr.setPixmap(pixmap)
-            lbl_qr.setAlignment(Qt.AlignCenter)
-            # Memberikan background putih agar QR mudah discan HP
-            lbl_qr.setStyleSheet(
-                "background-color: white; padding: 10px; border-radius: 8px;")
-            qr_layout.addWidget(lbl_qr)
+                # 3. Tampilkan Dialog QR
+                qr_dialog = QDialog(self)
+                qr_dialog.setWindowTitle("PDF Uploaded Successfully")
+                qr_dialog.setStyleSheet(
+                    "background-color: #0F172A; color: white;")
+                qr_layout = QVBoxLayout(qr_dialog)
 
-            lbl_url = QLabel(f"Or access directly via:\n{file_url}")
-            lbl_url.setStyleSheet(
-                "color: #64748b; font-size: 11px; margin-top: 5px;")
-            lbl_url.setAlignment(Qt.AlignCenter)
-            qr_layout.addWidget(lbl_url)
+                lbl_title = QLabel("SCAN TO DOWNLOAD PDF")
+                lbl_title.setStyleSheet(
+                    "font-size: 16px; font-weight: bold; color: #10b981;")
+                lbl_title.setAlignment(Qt.AlignCenter)
+                qr_layout.addWidget(lbl_title)
 
-            btn_close_qr = QPushButton("CLOSE")
-            btn_close_qr.setStyleSheet(
-                "background-color: #0ea5e9; font-weight: bold; padding: 10px; border-radius: 6px;")
-            btn_close_qr.clicked.connect(qr_dialog.accept)
-            qr_layout.addWidget(btn_close_qr)
+                lbl_qr = QLabel()
+                lbl_qr.setPixmap(pixmap)
+                lbl_qr.setAlignment(Qt.AlignCenter)
+                lbl_qr.setStyleSheet(
+                    "background-color: white; padding: 10px; border-radius: 8px;")
+                qr_layout.addWidget(lbl_qr)
 
-            qr_dialog.exec_()
+                lbl_url = QLabel(f"Or click the following link:\n{public_url}")
+                lbl_url.setStyleSheet(
+                    "color: #64748b; font-size: 11px; margin-top: 5px;")
+                lbl_url.setAlignment(Qt.AlignCenter)
+                qr_layout.addWidget(lbl_url)
 
-        except Exception as e:
-            # --- KODE LAMA ---
-            QMessageBox.critical(
-                self, "Export Failed", f"An error occurred while generating PDF:\n{str(e)}")
+                btn_close = QPushButton("TUTUP")
+                btn_close.setStyleSheet(
+                    "background-color: #0ea5e9; font-weight: bold; padding: 10px; border-radius: 6px;")
+                btn_close.clicked.connect(qr_dialog.accept)
+                qr_layout.addWidget(btn_close)
+
+                qr_dialog.exec_()
+            else:
+                QMessageBox.warning(
+                    self, "Upload Failed", "Make sure the Raspberry Pi is connected to Wi-Fi with internet access.")
 
         except Exception as e:
             QMessageBox.critical(
