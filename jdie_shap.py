@@ -754,11 +754,18 @@ class AgriWandDashboard(QMainWindow):
             explainer = shap.TreeExplainer(self.model_ai)
             shap_values = explainer.shap_values(self.last_input_features)
 
-            # Tentukan kelas prediksi teratas
-            pred_class_idx = int(np.argmax(
-                self.model_ai.predict_proba(self.last_input_features)[0]))
-            pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[
-                0].upper()
+            # Tentukan kelas berdasarkan target_crop yang sedang aktif
+            if self.target_crop == "General":
+                # Jika mode General, ambil prediksi AI teratas sebagai default
+                pred_class_idx = int(
+                    np.argmax(self.model_ai.predict_proba(self.last_input_features)[0]))
+                pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[
+                    0].upper()
+            else:
+                # Ambil index kelas dari tanaman yang dipilih user
+                pred_class_idx = int(self.label_encoder.transform(
+                    [self.target_crop.lower()])[0])
+                pred_crop = self.target_crop.upper()
 
             # Ambil SHAP values untuk kelas terprediksi
             if isinstance(shap_values, list):
@@ -1196,10 +1203,15 @@ class AgriWandDashboard(QMainWindow):
                     explainer = shap.TreeExplainer(self.model_ai)
                     shap_values = explainer.shap_values(
                         self.last_input_features)
-                    pred_class_idx = int(np.argmax(
-                        self.model_ai.predict_proba(self.last_input_features)[0]))
-                    pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[
-                        0].upper()
+                    if self.target_crop == "General":
+                        pred_class_idx = int(
+                            np.argmax(self.model_ai.predict_proba(self.last_input_features)[0]))
+                        pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[
+                            0].upper()
+                    else:
+                        pred_class_idx = int(self.label_encoder.transform(
+                            [self.target_crop.lower()])[0])
+                        pred_crop = self.target_crop.upper()
 
                     if isinstance(shap_values, list):
                         sv = shap_values[pred_class_idx][0]
