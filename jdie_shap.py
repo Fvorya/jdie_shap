@@ -1,5 +1,10 @@
 """
-This program uses AI to assess soil quality and then recommends suitable crops to plant.
+#1 Uses a machine learning model (Random Forest) to predict the most suitable crop based on current soil parameters.
+#2 Includes the SHAP (SHapley Additive exPlanations) function to explain why the AI chose a particular crop,
+   showing the positive or negative contributions of each soil parameter to the prediction.
+#3 Calculates the estimate of land correction costs based on user-editable commodity prices.
+#4 Capable of exporting in-depth analysis reports to PDF format and automatically uploading them to a public server
+   so it can be downloaded via a QR Code.
 """
 
 import sys
@@ -34,9 +39,9 @@ from PyQt5.QtCore import QUrl, Qt, QTimer
 from PyQt5.QtPrintSupport import QPrinter
 from PyQt5.QtGui import QTextDocument, QColor, QPixmap, QImage
 
-# ==========================================
+# ============================================================================
 # 1. PARAMETER CONFIGURATION (WARNA DISERAGAMKAN HIJAU = AMAN, MERAH = BAHAYA)
-# ==========================================
+# ============================================================================
 # Palet: [Merah (Kurang), Kuning (Marginal), Hijau (Optimal), Kuning (Marginal Lebih), Merah (Berlebih)]
 PARAM_CONFIG = {
     'suit': {'nama': 'Suitability', 'short': 'SUIT', 'unit': '%', 'min': 0, 'max': 100, 'warna': ['#dc2626', '#f59e0b', '#10b981'], 'optimal': '80 - 100', 'opt_min': 80, 'opt_max': 100},
@@ -60,29 +65,34 @@ NAMA_FILE_COMMODITY = os.path.join(os.path.dirname(
 
 
 def upload_pdf_to_web(filepath):
+    # Mengunggah file PDF ke layanan hosting publik (Catbox.moe).
     """
-    Mengunggah file PDF ke layanan hosting publik (Catbox.moe).
+    Mengunggah file PDF ke Litterbox (file sementara, auto-hapus).
+    expire: "1h", "12h", "24h", atau "72h"
     """
-    url = "https://catbox.moe/user/api.php"
-    data = {"reqtype": "fileupload"}
+    url = "https://litterbox.catbox.moe/resources/internals/api.php"
+    data = {
+        "reqtype": "fileupload",
+        "time": "1h"
+    }
 
     try:
         with open(filepath, 'rb') as f:
-            # Mengirim HTTP POST request berisi file
+            # Mengirim permintaan HTTP POST yang berisi sebuah berkas
             response = requests.post(url, data=data, files={'fileToUpload': f})
 
         if response.status_code == 200:
-            # Jika sukses, server merespons langsung dengan URL file-nya
-            return response.text
+            # Jika berhasil, server akan langsung merespons dengan URL berkas tersebut
+            return response.text.strip()
         else:
             return None
     except Exception as e:
         print(f"Failed to upload the file: {e}")
         return None
 
-# ==========================================
+# ===============================================
 # DIALOG PEMILIHAN TANAMAN (TOUCHSCREEN FRIENDLY)
-# ==========================================
+# ===============================================
 
 
 class CropSelectionDialog(QDialog):
@@ -90,7 +100,7 @@ class CropSelectionDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Select Target Crop")
         self.setStyleSheet("background-color: #0F172A; color: white;")
-        self.setFixedSize(600, 400)  # Ukuran dialog di layar 7 inch
+        self.setFixedSize(600, 400)
 
         layout = QVBoxLayout(self)
         lbl = QLabel("SELECT TARGET CROP", self)
@@ -99,7 +109,6 @@ class CropSelectionDialog(QDialog):
         lbl.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl)
 
-        # Buat Grid Button agar mudah ditekan jari
         grid_layout = QGridLayout()
         grid_layout.setSpacing(10)
 
@@ -162,10 +171,8 @@ class CommodityEditorDialog(QDialog):
         lbl.setAlignment(Qt.AlignCenter)
         layout.addWidget(lbl)
 
-        # Konfigurasi Tabel dengan urutan kolom baru
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        # Urutan: Key -> Action Name -> Concentration -> Price
         self.table.setHorizontalHeaderLabels([
             "Item Key",
             "Action Name",
@@ -348,9 +355,9 @@ class CommodityEditorDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save: {e}")
 
-# ==========================================
+# =============================
 # 2. MAIN GUI APPLICATION CLASS
-# ==========================================
+# =============================
 
 
 class AgriWandDashboard(QMainWindow):
@@ -503,7 +510,7 @@ class AgriWandDashboard(QMainWindow):
         self.btn_ai.clicked.connect(self.run_ai_recommendation)
         left_layout.addWidget(self.btn_ai)
 
-        # ---- TOMBOL SHAP BARU ----
+        # ---- TOMBOL SHAP ----
         self.btn_shap = QPushButton("SHAP EXPLANATION")
         self.btn_shap.setStyleSheet(
             "background-color: #7c3aed; color: white; font-weight: bold; padding: 15px; border-radius: 6px; border: none; font-size: 14px;")
@@ -570,7 +577,7 @@ class AgriWandDashboard(QMainWindow):
         dialog = CropSelectionDialog(self.crop_list, self)
         if dialog.exec_() == QDialog.Accepted and dialog.selected_crop:
             self.target_crop = dialog.selected_crop
-            self.btn_target_crop.setText(f"TARGET: {self.target_crop.upper()}")
+            self.btn_target_crop.setText(f"{self.target_crop.upper()}")
 
             if self.target_crop == "General":
                 self.reset_param_config()
@@ -710,18 +717,17 @@ class AgriWandDashboard(QMainWindow):
                 # Auto Set Target ke Pilihan #1
                 self.target_crop = top3_crops[0]
                 self.btn_target_crop.setText(
-                    f"TARGET: {self.target_crop.upper()}")
+                    f"{self.target_crop.upper()}")
                 self.activate_mode_2()
             else:
                 self.target_crop = self.label_encoder.inverse_transform(
                     self.model_ai.predict(input_features))[0]
                 self.btn_target_crop.setText(
-                    f"TARGET: {self.target_crop.upper()}")
+                    f"{self.target_crop.upper()}")
                 self.lbl_insight.setText(
                     f"AI PREDICTION: {self.target_crop.upper()}")
                 self.activate_mode_2()
 
-            # ---- AKTIFKAN TOMBOL SHAP ----
             self.btn_shap.setEnabled(True)
 
         except:
@@ -896,7 +902,7 @@ class AgriWandDashboard(QMainWindow):
 
             avg_val = np.mean(vals)
 
-            # --- UPDATE UI PROGRESS BAR & TEXT ---
+            # UPDATE UI PROGRESS BAR & TEXT
             self.lbl_param_title.setText(f"{conf['nama'].upper()}")
             self.lbl_param_value.setText(
                 f"{avg_val:.1f} <span style='font-size:20px; color:#94a3b8;'>{conf['unit']}</span>")
@@ -1400,7 +1406,7 @@ class AgriWandDashboard(QMainWindow):
             # 1. Panggil fungsi upload
             public_url = upload_pdf_to_web(path)
 
-            self.statusBar().clearMessage()  # Bersihkan status bar
+            self.statusBar().clearMessage()
 
             if public_url:
                 # 2. Generate QR Code dari URL Publik
