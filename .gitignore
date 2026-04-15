@@ -1,6 +1,6 @@
 TERRA_dashboard copy.py
 *.html
-*.png
+overlay_dynamic.png
 venvTerraCore/
 report/
 
