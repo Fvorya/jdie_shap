@@ -365,34 +365,50 @@ class CommodityEditorDialog(QDialog):
 # WORKER THREAD - Export PDF & Upload berjalan di background thread
 # =====================================================================
 class ExportWorker(QThread):
-    # Sinyal untuk komunikasi ke UI thread
-    progress_msg  = pyqtSignal(str)          # update status bar
-    export_done   = pyqtSignal(str, str)     # (pdf_path, public_url)
-    export_error  = pyqtSignal(str)          # pesan error
+    progress_msg  = pyqtSignal(str)
+    export_done   = pyqtSignal(str, str)
+    export_error  = pyqtSignal(str)
 
-    def __init__(self, html_content, page2_html, pdf_path, parent=None):
+    def __init__(self, html_content, page2_html, page3_html, pdf_path, parent=None):
         super().__init__(parent)
         self.html_content = html_content
         self.page2_html   = page2_html
+        self.page3_html   = page3_html  # ← PARAMETER BARU
         self.pdf_path     = pdf_path
 
     def run(self):
         try:
-            # --- Render PDF ---
             self.progress_msg.emit("Rendering PDF...")
-            printer = QPrinter(QPrinter.ScreenResolution)
+            printer = QPrinter(QPrinter.HighResolution)
             printer.setOutputFormat(QPrinter.PdfFormat)
             printer.setOutputFileName(self.pdf_path)
+            printer.setPageSize(QPrinter.A4)
+            printer.setPageMargins(10, 15, 10, 20, QPrinter.Millimeter)
+
+            full_html = f"""
+            <html>
+            <head>
+                <style>
+                    @media print {{
+                        body {{ margin: 0; padding: 0; }}
+                        div.page-break-before {{ page-break-before: always; }}
+                    }}
+                </style>
+            </head>
+            <body>
+                {self.html_content}
+                {self.page2_html}
+                {self.page3_html}
+            </body>
+            </html>
+            """
 
             doc = QTextDocument()
-            doc.setHtml(self.html_content + self.page2_html)
+            doc.setHtml(full_html)
             doc.print_(printer)
 
-            # --- Upload ke web ---
             self.progress_msg.emit("Uploading PDF to web server...")
             public_url = upload_pdf_to_web(self.pdf_path)
-
-            # Kirim sinyal selesai ke UI thread
             self.export_done.emit(self.pdf_path, public_url or "")
 
         except Exception as e:
@@ -482,7 +498,7 @@ class AgriWandDashboard(QMainWindow):
         
         lbl_logo.setAlignment(Qt.AlignCenter)
         
-        top_bar.addWidget(lbl_logo)
+        #top_bar.addWidget(lbl_logo)
 
         self.combo_main_file = QComboBox()
         self.combo_main_file.currentIndexChanged.connect(
@@ -1118,6 +1134,55 @@ class AgriWandDashboard(QMainWindow):
 
             peta.save(TEMP_HTML)
 
+            # Baca file HTML yang baru saja disimpan
+            with open(TEMP_HTML, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+
+            # Buat base64 dari logo UKSW
+            try:
+                with open('uksw_logo.png', 'rb') as img_file:
+                    logo_b64 = base64.b64encode(img_file.read()).decode('utf-8')
+                    logo_img = f"data:image/png;base64,{logo_b64}"
+            except:
+                logo_img = None
+
+            # Inject CSS dan HTML untuk logo dengan opacity rendah
+            if logo_img:
+                logo_html = f"""
+                <style>
+                    .logo-container {{
+                        position: fixed;
+                        top: 15px;
+                        right: 15px;
+                        z-index: 1000;
+                        background-color: rgba(255, 255, 255, 0.15);
+                        padding: 8px;
+                        border-radius: 6px;
+                        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+                    }}
+                    .logo-img {{
+                        width: 75px;
+                        height: auto;
+                        opacity: 0.6;
+                        transition: opacity 0.3s ease;
+                    }}
+                    .logo-img:hover {{
+                        opacity: 0.9;
+                    }}
+                </style>
+                
+                <div class="logo-container">
+                    <img src="{logo_img}" class="logo-img" alt="UKSW Logo" title="Satya Wacana Christian University">
+                </div>
+                """
+                
+                # Inject sebelum closing body tag
+                html_content = html_content.replace('</body>', logo_html + '</body>')
+
+            # Simpan HTML yang sudah dimodifikasi
+            with open(TEMP_HTML, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+
             if self.btn_map_style.isChecked():
                 with open(TEMP_HTML, "a") as f:
                     f.write(
@@ -1129,7 +1194,7 @@ class AgriWandDashboard(QMainWindow):
             pass
         finally:
             QApplication.restoreOverrideCursor()
-
+        
     def generate_report(self):
         if len(self.raw_data) == 0:
             QMessageBox.warning(
@@ -1178,6 +1243,9 @@ class AgriWandDashboard(QMainWindow):
             uniformity_score = max(
                 0, 100 - (np.mean([n_std, p_std, k_std, t_std, h_std, ph_std]) * 2))
 
+            # =====================================================================
+            # HALAMAN 1: Field Condition Summary + Soil Nutrient Breakdown
+            # =====================================================================
             html_content = f"""
             <div style='font-family: Arial, sans-serif; color: #1e293b; line-height: 1.5;'>
                 <table width="100%" style="border-bottom: 3px solid #0ea5e9; padding-bottom: 10px; margin-bottom: 15px;">
@@ -1192,17 +1260,15 @@ class AgriWandDashboard(QMainWindow):
                                 {r2c_img}
                             </div>
                             <span style="font-size: 10pt; color: #475569;"><b>Doc ID:</b> TC-RPT-{datetime.now().strftime('%y%m%d%H%M')}</span><br>
-                            <span style="font-size: 10pt; color: #475569;"><b>Generated:</b> {datetime.now().strftime('%d %b %Y, %H:%M')}</span><br>
-                            <span style="font-size: 10pt; color: #475569;"><b>Timeline:</b> {self.current_file_name}</span>
                         </td>
                     </tr>
                 </table>
 
                 <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #8b5cf6; padding-left: 8px;'>1. Field Condition Summary</h3>
                 <p style='font-size: 11pt; text-align: justify; background-color: #f8fafc; padding: 10px; border: 1px solid #e2e8f0;'>
-                    "This report contains the results of a land condition assessment. Our system has examined {sample_size} locations to determine 
-                    whether this land is suitable for growing {self.target_crop.upper()}. In general, the current land condition is <b style="color:{color_status};">
-                    {condition_status}</b>. The uniformity of soil conditions in the area is approximately {uniformity_score:.1f}%."
+                    This report contains the results of a land condition assessment. Our system has examined {sample_size} locations to determine 
+                    whether this land is suitable for growing <b>{self.target_crop.upper()}</b>. In general, the current land condition is <b style="color:{color_status};">
+                    {condition_status}</b>. The uniformity of soil conditions in the area is approximately {uniformity_score:.1f}%.
                 </p>
 
                 <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #10b981; padding-left: 8px; margin-top: 20px;'>2. Soil Nutrient Breakdown</h3>
@@ -1264,30 +1330,23 @@ class AgriWandDashboard(QMainWindow):
                         <td style="border: 1px solid #cbd5e1; color:#64748b;">± {ph_std:.2f}</td>
                     </tr>
                 </table>
-
-                <div style="margin-top: 30px; text-align: center; font-size: 9pt; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 10px;">
-                    <b>TERRA-CORE Enterprise AI Node</b> | Developed by R2C Team - Faculty of Electronics and Computer Engineering, Satya Wacana Christian University<br>
-                    <i>Generated securely via PyQt5 Print Support Engine</i>
-                </div>
             </div>
             """
 
-            # ───────────────────────────────────────────
-            # HALAMAN 2 — SHAP + Decision Support System
-            # ───────────────────────────────────────────
+            # =====================================================================
+            # HALAMAN 2: SHAP Explanation
+            # =====================================================================
 
-            # 1. Encode SHAP chart jadi base64 (jika tersedia)
+            # 1. Encode SHAP chart jadi base64
             shap_img_tag = ""
             if hasattr(self, 'last_input_features') and self.model_ready:
                 try:
                     explainer = shap.TreeExplainer(self.model_ai)
-                    shap_values = explainer.shap_values(
-                        self.last_input_features)
+                    shap_values = explainer.shap_values(self.last_input_features)
                     if self.target_crop == "General":
                         pred_class_idx = int(
                             np.argmax(self.model_ai.predict_proba(self.last_input_features)[0]))
-                        pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[
-                            0].upper()
+                        pred_crop = self.label_encoder.inverse_transform([pred_class_idx])[0].upper()
                     else:
                         pred_class_idx = int(self.label_encoder.transform(
                             [self.target_crop.lower()])[0])
@@ -1308,20 +1367,17 @@ class AgriWandDashboard(QMainWindow):
                     ax.set_facecolor('#1E293B')
                     colors = ['#ef4444' if v < 0 else '#10b981' for v in sv]
                     y_pos = range(len(feature_names))
-                    bars = ax.barh(y_pos, sv, color=colors,
-                                   edgecolor='none', height=0.6)
+                    bars = ax.barh(y_pos, sv, color=colors, edgecolor='none', height=0.6)
                     ax.set_yticks(list(y_pos))
                     ax.set_yticklabels(
-                        [f"{n}  ({v:.2f})" for n, v in zip(
-                            feature_names, feature_values)],
+                        [f"{n}  ({v:.2f})" for n, v in zip(feature_names, feature_values)],
                         color='white', fontsize=10)
                     ax.set_xlabel("Impact on Decision", color='#94a3b8', fontsize=9)
                     ax.set_title(f"Why the system chose: {pred_crop}",
-                                 color='#0ea5e9', fontsize=11, fontweight='bold', pad=12)
+                                color='#0ea5e9', fontsize=11, fontweight='bold', pad=12)
                     ax.tick_params(colors='white')
                     ax.spines[:].set_color('#334155')
-                    ax.axvline(0, color='#64748b',
-                               linewidth=0.8, linestyle='--')
+                    ax.axvline(0, color='#64748b', linewidth=0.8, linestyle='--')
                     for bar, val in zip(bars, sv):
                         x_pos = bar.get_width()
                         ha = 'left' if x_pos >= 0 else 'right'
@@ -1340,8 +1396,7 @@ class AgriWandDashboard(QMainWindow):
                     buf_shap.seek(0)
                     plt.close(fig)
 
-                    shap_b64 = base64.b64encode(
-                        buf_shap.read()).decode('utf-8')
+                    shap_b64 = base64.b64encode(buf_shap.read()).decode('utf-8')
                     shap_img_tag = f'''
                     <div style="text-align: center; margin: 15px 10px; padding: 5px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px;">
                         <img src="data:image/png;base64,{shap_b64}" 
@@ -1352,14 +1407,59 @@ class AgriWandDashboard(QMainWindow):
                 except Exception:
                     shap_img_tag = "<p style='color:red;'>SHAP chart could not be generated.</p>"
 
+            page2_html = f"""
+            <div style='page-break-before: always; font-family: Arial, sans-serif;
+                        color: #1e293b; line-height: 1.5; margin: 0; padding: 0;'>
+
+                <!-- Header halaman 2 -->
+                <table width="100%" cellpadding="0" cellspacing="0" 
+                    style="border-bottom: 3px solid #0ea5e9; padding-bottom: 8px; margin-bottom: 12px;">
+                    <tr>
+                        <td style="padding: 0;">
+                            <h1 style='color: #0ea5e9; font-size: 20pt; margin:0; padding:0;'>TERRA-CORE</h1>
+                            <h2 style='color: #64748b; font-size: 11pt; margin: 3px 0 0 0; padding:0;'>
+                                Explainability &amp; Decision Support</h2>
+                        </td>
+                        <td align="right" valign="top" style="padding: 0;">
+                            <span style="font-size:9pt; color:#475569;">
+                                <b>Crop Target:</b> {self.target_crop.upper()}<br>
+                                <b>Field Status:</b> <b style="color:{color_status};">{condition_status}</b>
+                            </span>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- Seksi SHAP -->
+                <h3 style='color:#334155; font-size:12pt; margin: 12px 0 8px 0; padding: 0;
+                        border-left:4px solid #8b5cf6; padding-left:8px;'>
+                    3. Why We Recommend {self.target_crop.upper()}</h3>
+                <p style='font-size:9.5pt; color:#475569; margin: 0 0 8px 0; padding: 0;'>
+                    The chart below shows how each soil parameter contributed to
+                    (<span style='color:#10b981; font-weight:bold;'>green = supports</span>) or
+                    hindered (<span style='color:#ef4444; font-weight:bold;'>red = opposes</span>)
+                    the prediction for <b>{self.target_crop.upper()}</b>.
+                </p>
+                
+                <!-- Container gambar -->
+                <div style='text-align: center; margin: 8px 0; padding: 5px;'>
+                    {shap_img_tag}
+                </div>
+            </div>
+            """
+
+            # =====================================================================
+            # HALAMAN 3: Action Plan & Expected Costs (VARIABEL TERPISAH)
+            # =====================================================================
+
+            # Load commodity data
             try:
                 with open(NAMA_FILE_COMMODITY, 'r') as f:
                     commodity_data = json.load(f)
-                    print(
-                        f"[OK] Loaded {len(commodity_data)} commodity keys: {list(commodity_data.keys())}")
+                    print(f"[OK] Loaded {len(commodity_data)} commodity keys: {list(commodity_data.keys())}")
             except Exception as e:
                 QMessageBox.warning(self, "Commodity Load Error",
                                     f"Failed to read commodity_prices.json:\n{str(e)}\n\nEstimated Cost: N/A")
+                commodity_data = {}
 
             # 2. Bangun tabel DSS
             def dss_row(param_label, param_key, unit, avg, opt_min, opt_max, low_action, high_action):
@@ -1400,7 +1500,7 @@ class AgriWandDashboard(QMainWindow):
                         <td style="border:1px solid #cbd5e1; padding:7px; text-align:center;">{avg:.2f}</td>
                         <td style="border:1px solid #cbd5e1; padding:7px; text-align:center;">{opt_min:.1f} - {opt_max:.1f}</td>
                         <td style="border:1px solid #cbd5e1; padding:7px; text-align:center;
-                                   color:{status_color}; font-weight:bold;">{status_text}</td>
+                                color:{status_color}; font-weight:bold;">{status_text}</td>
                         <td style="border:1px solid #cbd5e1; padding:7px; font-size:9.5pt;">{action}</td>
                         <td style="border:1px solid #cbd5e1; padding:7px; text-align:right; font-weight:bold;">{cost_estimation}</td>
                     </tr>"""
@@ -1432,18 +1532,18 @@ class AgriWandDashboard(QMainWindow):
                         "Apply elemental sulfur or acidifying fertilizer (e.g., Ammonium Sulfate) to lower pH.")
             )
 
-            page2_html = f"""
+            page3_html = f"""
             <div style='page-break-before: always; font-family: Arial, sans-serif;
                         color: #1e293b; line-height: 1.5; margin: 0; padding: 0;'>
 
-                <!-- Header halaman 2 -->
+                <!-- Header halaman 3 -->
                 <table width="100%" cellpadding="0" cellspacing="0" 
                     style="border-bottom: 3px solid #0ea5e9; padding-bottom: 8px; margin-bottom: 12px;">
                     <tr>
                         <td style="padding: 0;">
                             <h1 style='color: #0ea5e9; font-size: 20pt; margin:0; padding:0;'>TERRA-CORE</h1>
                             <h2 style='color: #64748b; font-size: 11pt; margin: 3px 0 0 0; padding:0;'>
-                                Explainability &amp; Decision Support</h2>
+                                Action Plan &amp; Decision Support</h2>
                         </td>
                         <td align="right" valign="top" style="padding: 0;">
                             <span style="font-size:9pt; color:#475569;">
@@ -1454,24 +1554,8 @@ class AgriWandDashboard(QMainWindow):
                     </tr>
                 </table>
 
-                <!-- Seksi SHAP dengan layout ketat -->
+                <!-- Seksi DSS -->
                 <h3 style='color:#334155; font-size:12pt; margin: 12px 0 8px 0; padding: 0;
-                        border-left:4px solid #8b5cf6; padding-left:8px;'>
-                    3. Why We Recommend {self.target_crop.upper()}</h3>
-                <p style='font-size:9.5pt; color:#475569; margin: 0 0 8px 0; padding: 0;'>
-                    The chart below shows how each soil parameter contributed to
-                    (<span style='color:#10b981; font-weight:bold;'>green = supports</span>) or
-                    hindered (<span style='color:#ef4444; font-weight:bold;'>red = opposes</span>)
-                    the prediction for <b>{self.target_crop.upper()}</b>.
-                </p>
-                
-                <!-- Container gambar dengan constraint ukuran -->
-                <div style='text-align: center; margin: 8px 0; padding: 5px;'>
-                    {shap_img_tag}
-                </div>
-
-                <!-- Seksi DSS dengan margin ketat -->
-                <h3 style='color:#334155; font-size:12pt; margin: 15px 0 8px 0; padding: 0;
                         border-left:4px solid #f59e0b; padding-left:8px;'>
                     4. Action Plan &amp; Expected Costs</h3>
                 <table width="100%" cellspacing="0" cellpadding="5"
@@ -1486,18 +1570,35 @@ class AgriWandDashboard(QMainWindow):
                     </tr>
                     {dss_rows}
                 </table>
-
-                <!-- Footer dengan spacing minimal -->
-                <div style="margin-top:15px; text-align:center; font-size:8.5pt;
-                            color:#94a3b8; border-top:1px solid #e2e8f0; padding-top:8px;">
-                    <b>TERRA-CORE Enterprise AI Node</b> | R2C Team - UKSW
-                </div>
-
             </div>
             """
             
+            FOOTER_HTML = f"""
+            <div style="margin-top: 30px; padding-top: 15px; border-top: 2px solid #0ea5e9; 
+                        font-size: 8pt; color: #64748b; text-align: center;">
+                <p style="margin: 5px 0;">
+                    Developed by R2C Team - Faculty of Electronics and Computer Engineering, 
+                    Satya Wacana Christian University
+                </p>
+                <p style="margin: 3px 0; color: #475569;">
+                    <b>Generated:</b> {datetime.now().strftime('%d %b %Y, %H:%M')} | 
+                    <b>Doc ID:</b> TC-RPT-{datetime.now().strftime('%y%m%d%H%M')} | 
+                    <b>Timeline:</b> {self.current_file_name}
+                </p>
+            </div>
+            """
+
+            # Tambahkan footer ke setiap halaman
+            html_content += FOOTER_HTML
+            page2_html += FOOTER_HTML
+            page3_html += FOOTER_HTML
+
+            # =====================================================================
+            # EXPORT KE PDF
+            # =====================================================================
+            
             self.statusBar().showMessage("Exporting PDF... please wait.")
-            self._export_worker = ExportWorker(html_content, page2_html, path)
+            self._export_worker = ExportWorker(html_content, page2_html, page3_html, path)
             self._export_worker.progress_msg.connect(self.statusBar().showMessage)
             self._export_worker.export_done.connect(self._on_export_done)
             self._export_worker.export_error.connect(self._on_export_error)
