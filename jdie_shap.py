@@ -35,7 +35,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QFileDialog, QMessageBox, QProgressBar, QDialog, QGridLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import QUrl, Qt, QTimer
+from PyQt5.QtCore import QUrl, Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtPrintSupport import QPrinter
 from PyQt5.QtGui import QTextDocument, QColor, QPixmap, QImage
 
@@ -68,7 +68,6 @@ def upload_pdf_to_web(filepath):
     # Mengunggah file PDF ke layanan hosting publik (Catbox.moe).
     """
     Mengunggah file PDF ke Litterbox (file sementara, auto-hapus).
-    expire: "1h", "12h", "24h", atau "72h"
     """
     url = "https://litterbox.catbox.moe/resources/internals/api.php"
     data = {
@@ -93,7 +92,6 @@ def upload_pdf_to_web(filepath):
 # ===============================================
 # DIALOG PEMILIHAN TANAMAN (TOUCHSCREEN FRIENDLY)
 # ===============================================
-
 
 class CropSelectionDialog(QDialog):
     def __init__(self, crops, parent=None):
@@ -179,7 +177,15 @@ class CommodityEditorDialog(QDialog):
             "Concentration (%)",
             "Price per Kg"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.table.horizontalHeader()
+
+        # Kolom 0, 2, dan 3 akan menyesuaikan dengan isi teksnya
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+
+        # Kolom 1 (Action Name) akan mengambil sisa ruang yang tersedia
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.setStyleSheet("""
             QTableWidget { background-color: #1E293B; color: white; gridline-color: #334155; border: 1px solid #334155; border-radius: 6px; }
             QHeaderView::section { background-color: #0F172A; color: #0ea5e9; font-weight: bold; padding: 8px; border: 1px solid #334155; }
@@ -355,10 +361,46 @@ class CommodityEditorDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save: {e}")
 
+# =====================================================================
+# WORKER THREAD - Export PDF & Upload berjalan di background thread
+# =====================================================================
+class ExportWorker(QThread):
+    # Sinyal untuk komunikasi ke UI thread
+    progress_msg  = pyqtSignal(str)          # update status bar
+    export_done   = pyqtSignal(str, str)     # (pdf_path, public_url)
+    export_error  = pyqtSignal(str)          # pesan error
+
+    def __init__(self, html_content, page2_html, pdf_path, parent=None):
+        super().__init__(parent)
+        self.html_content = html_content
+        self.page2_html   = page2_html
+        self.pdf_path     = pdf_path
+
+    def run(self):
+        try:
+            # --- Render PDF ---
+            self.progress_msg.emit("Rendering PDF...")
+            printer = QPrinter(QPrinter.ScreenResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(self.pdf_path)
+
+            doc = QTextDocument()
+            doc.setHtml(self.html_content + self.page2_html)
+            doc.print_(printer)
+
+            # --- Upload ke web ---
+            self.progress_msg.emit("Uploading PDF to web server...")
+            public_url = upload_pdf_to_web(self.pdf_path)
+
+            # Kirim sinyal selesai ke UI thread
+            self.export_done.emit(self.pdf_path, public_url or "")
+
+        except Exception as e:
+            self.export_error.emit(str(e))
+
 # =============================
 # 2. MAIN GUI APPLICATION CLASS
 # =============================
-
 
 class AgriWandDashboard(QMainWindow):
     def __init__(self):
@@ -402,6 +444,18 @@ class AgriWandDashboard(QMainWindow):
         self.scan_dataset_folder()
 
         self.ui_ready = True
+        
+    def handle_menu_selection(self, index):
+        # index 0 adalah placeholder "Select Action"
+        if index == 1:
+            self.show_price_editor() # Sesuaikan dengan nama fungsi edit harga Anda
+        elif index == 2:
+            self.generate_report()   # Sesuaikan dengan nama fungsi export PDF Anda
+        elif index == 3:
+            self.close()             # Fungsi bawaan untuk menutup aplikasi
+
+        # Reset kembali ke index 0 setelah memilih agar bisa dipilih ulang
+        self.action_menu.setCurrentIndex(0)
 
     def init_ui(self):
         central_widget = QWidget()
@@ -417,6 +471,18 @@ class AgriWandDashboard(QMainWindow):
         title_lbl.setStyleSheet(
             "color: #0ea5e9; font-size: 24px; font-weight: 900; letter-spacing: 2px;")
         top_bar.addWidget(title_lbl)
+        
+        lbl_logo = QLabel()
+        
+        pixmap = QPixmap("uksw_logo.png")
+        
+        pixmap_kustom = pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        
+        lbl_logo.setPixmap(pixmap_kustom)
+        
+        lbl_logo.setAlignment(Qt.AlignCenter)
+        
+        top_bar.addWidget(lbl_logo)
 
         self.combo_main_file = QComboBox()
         self.combo_main_file.currentIndexChanged.connect(
@@ -429,31 +495,51 @@ class AgriWandDashboard(QMainWindow):
             "background-color: #1E293B; color: #f59e0b; font-weight: bold; padding: 10px; border-radius: 6px; font-size: 14px; border: 1px solid #334155;")
         self.btn_target_crop.clicked.connect(self.show_crop_dialog)
         self.btn_target_crop.setFixedWidth(175)
+        
+        self.action_menu = QComboBox()
+        self.action_menu.addItem("  ▼")
+        self.action_menu.addItem("Edit Fertilizer Prices")
+        self.action_menu.addItem("Export PDF Report")
+        self.action_menu.addItem("Exit Application")
 
-        # ---> TAMBAHKAN KODE INI <---
-        self.btn_edit_json = QPushButton("EDIT PRICES")
-        self.btn_edit_json.setStyleSheet(
-            "background-color: #8b5cf6; color: white; font-weight: bold; padding: 10px 15px; border-radius: 6px;")
-        self.btn_edit_json.clicked.connect(self.show_price_editor)
+        # Style agar tampilannya bersih dan modern
+        self.action_menu.setStyleSheet("""
+            QComboBox { 
+                background-color: #27B4F5; 
+                color: white; 
+                padding: 2px;             /* Padding sangat kecil */
+                border-radius: 4px; 
+                font-weight: bold; 
+                min-width: 40px;          /* Lebar minimal agar jadi kotak kecil */
+                max-width: 40px;          /* Lebar maksimal agar tidak melebar */
+                border: 1px solid #475569;
+            }
+            /* Menghilangkan panah default bawaan OS karena kita pakai teks ▼ */
+            QComboBox::drop-down { 
+                border: 0px; 
+            }
+            /* Style saat dropdown terbuka */
+            QComboBox QAbstractItemView { 
+                background-color: #1e293b; 
+                color: white; 
+                selection-background-color: #0ea5e9;
+                min-width: 200px;         /* Lebar list menu saat terbuka agar teks terbaca */
+            }
+            /* Menghilangkan border pada lineEdit */
+            QComboBox QLineEdit {
+                background: transparent;
+                border: none;
+                color: white;
+            }
+        """)
 
-        # REVISI 2: Hapus Emoji
-        self.btn_export = QPushButton("EXPORT PDF")
-        self.btn_export.setStyleSheet(
-            "background-color: #0ea5e9; color: white; font-weight: bold; padding: 10px 15px; border-radius: 6px;")
-        self.btn_export.clicked.connect(self.generate_report)
-
-        btn_exit = QPushButton("EXIT")
-        btn_exit.setStyleSheet(
-            "background-color: #ef4444; color: white; font-weight: bold; padding: 10px 10px; border-radius: 6px;")
-        btn_exit.clicked.connect(self.close)
+        # Hubungkan ke fungsi pengontrol
+        self.action_menu.activated.connect(self.handle_menu_selection)
 
         top_bar.addStretch()
-        top_bar.addWidget(QLabel("DATASET:"))
+        top_bar.addWidget(QLabel("TIMELINE:"))
         top_bar.addWidget(self.combo_main_file)
-        top_bar.addWidget(self.btn_target_crop)
-        top_bar.addWidget(self.btn_edit_json)
-        top_bar.addWidget(self.btn_export)
-        top_bar.addWidget(btn_exit)
+        top_bar.addWidget(self.action_menu)
         main_layout.addLayout(top_bar)
 
         # === 2. MIDDLE AREA (Left Panel + Map) ===
@@ -496,26 +582,40 @@ class AgriWandDashboard(QMainWindow):
             "background-color: #334155; border: none; margin: 10px 0;")
         left_layout.addWidget(line)
 
-        left_layout.addWidget(QLabel("AI DIAGNOSTICS & TOP MATCH:",
-                              styleSheet="color: #64748B; font-weight: bold; font-size: 11px; border: none;"))
-        self.lbl_insight = QLabel("Awaiting spatial data...")
+        self.lbl_insight = QLabel("Please select a field to begin.")
         self.lbl_insight.setWordWrap(True)
         self.lbl_insight.setStyleSheet(
             "color: #fcd34d; font-size: 14px; border: none; line-height: 1.4; padding-top: 5px;")
+        
+        # Tombol Target Crop (Dipindah ke sini)
+        self.btn_target_crop = QPushButton("TARGET: GENERAL")
+        self.btn_target_crop.setStyleSheet("""
+            QPushButton { 
+                background-color: #1e293b; color: #f59e0b; border: 1px solid #334155; 
+                padding: 12px; border-radius: 6px; font-weight: bold; font-size: 15px;
+            }
+            QPushButton:hover { background-color: #334155; }
+        """)
+        
+        self.btn_target_crop.clicked.connect(self.show_crop_dialog)
+        left_layout.addWidget(self.btn_target_crop)
+        
+        left_layout.addSpacing(5)
+        
         left_layout.addWidget(self.lbl_insight, stretch=1)
 
-        self.btn_ai = QPushButton("RUN AI ANALYSIS")
+        self.btn_ai = QPushButton("GET PREDICTIONS")
         self.btn_ai.setStyleSheet(
             "background-color: #4f46e5; color: white; font-weight: bold; padding: 15px; border-radius: 6px; border: none; font-size: 14px;")
         self.btn_ai.clicked.connect(self.run_ai_recommendation)
         left_layout.addWidget(self.btn_ai)
 
         # ---- TOMBOL SHAP ----
-        self.btn_shap = QPushButton("SHAP EXPLANATION")
+        self.btn_shap = QPushButton("PREDICTION EXPLANATION")
         self.btn_shap.setStyleSheet(
-            "background-color: #7c3aed; color: white; font-weight: bold; padding: 15px; border-radius: 6px; border: none; font-size: 14px;")
+            "background-color: #4f46e5; color: white; font-weight: bold; padding: 15px; border-radius: 6px; border: none; font-size: 14px;")
         self.btn_shap.clicked.connect(self.show_shap_analysis)
-        self.btn_shap.setEnabled(False)   # aktif setelah AI dijalankan
+        self.btn_shap.setEnabled(False)
         left_layout.addWidget(self.btn_shap)
 
         middle_area.addWidget(self.left_panel)
@@ -555,7 +655,7 @@ class AgriWandDashboard(QMainWindow):
             if key == 'suit':
                 btn.setChecked(True)
 
-        self.btn_map_style = QPushButton("MAP: HYBRID")
+        self.btn_map_style = QPushButton("MAP: SATTELITE")
         self.btn_map_style.setCheckable(True)
         self.btn_map_style.setFixedSize(140, 60)
         self.btn_map_style.setStyleSheet(btn_style)
@@ -573,6 +673,7 @@ class AgriWandDashboard(QMainWindow):
     # ==========================================
     # LOGIC FUNCTIONS
     # ==========================================
+    
     def show_crop_dialog(self):
         dialog = CropSelectionDialog(self.crop_list, self)
         if dialog.exec_() == QDialog.Accepted and dialog.selected_crop:
@@ -684,7 +785,7 @@ class AgriWandDashboard(QMainWindow):
     def run_ai_recommendation(self):
         if not self.model_ready or len(self.raw_data) == 0:
             return
-        self.btn_ai.setText("PROCESSING AI...")
+        self.btn_ai.setText("PROCESSING...")
         QApplication.processEvents()
 
         try:
@@ -707,10 +808,10 @@ class AgriWandDashboard(QMainWindow):
                 top3_probs = probs[top3_idx] * 100
 
                 # Format Top 3 dan letakkan di Insight Panel
-                res_txt = "<span style='color:#a7f3d0;'><b>TOP 3 AI PREDICTIONS:</b></span><br>"
+                res_txt = "<span style='color:#a7f3d0; font-size: 18px;'><b>TOP 3 PREDICTIONS:</b></span><br>"
                 for i in range(3):
                     c_color = "#10b981" if i == 0 else "#f59e0b" if i == 1 else "#94a3b8"
-                    res_txt += f"<span style='color:{c_color}; font-size:15px;'>{i+1}. {top3_crops[i].upper()} ({top3_probs[i]:.1f}%)</span><br>"
+                    res_txt += f"<span style='color:{c_color}; font-size:16px;'>{i+1}. {top3_crops[i].upper()} ({top3_probs[i]:.1f}%)</span><br>"
 
                 self.lbl_insight.setText(res_txt)
 
@@ -725,16 +826,16 @@ class AgriWandDashboard(QMainWindow):
                 self.btn_target_crop.setText(
                     f"{self.target_crop.upper()}")
                 self.lbl_insight.setText(
-                    f"AI PREDICTION: {self.target_crop.upper()}")
+                    f"PREDICTION: {self.target_crop.upper()}")
                 self.activate_mode_2()
 
             self.btn_shap.setEnabled(True)
 
         except:
             self.lbl_insight.setText(
-                "AI processing failed. Check model or data.")
+                "Processing failed. Check model or data.")
         finally:
-            self.btn_ai.setText("RUN AI ANALYSIS")
+            self.btn_ai.setText("GET PREDICTIONS")
 
     # ==========================================
     # SHAP EXPLANATION
@@ -743,11 +844,11 @@ class AgriWandDashboard(QMainWindow):
         """Menampilkan SHAP waterfall plot untuk prediksi AI terakhir."""
         if not self.model_ready or not hasattr(self, 'last_input_features'):
             QMessageBox.warning(self, "SHAP Error",
-                                "Run the AI Analysis first.")
+                                "Run the ""GET DECISIONS"" first.")
             return
 
         try:
-            self.btn_shap.setText("COMPUTING SHAP...")
+            self.btn_shap.setText("COMPUTING DECISION...")
             QApplication.processEvents()
 
             # --- Hitung SHAP menggunakan TreeExplainer (cocok untuk RandomForest) ---
@@ -794,8 +895,8 @@ class AgriWandDashboard(QMainWindow):
                     feature_names, feature_values)],
                 color='white', fontsize=11)
 
-            ax.set_xlabel("SHAP Values", color='#94a3b8', fontsize=10)
-            ax.set_title(f"Feature Contributions to: {pred_crop}",
+            ax.set_xlabel("Impact on Decision", color='#94a3b8', fontsize=10)
+            ax.set_title(f"Why the system chose: {pred_crop}",
                          color='#0ea5e9', fontsize=11, fontweight='bold', pad=15)
 
             ax.tick_params(colors='white')
@@ -806,7 +907,7 @@ class AgriWandDashboard(QMainWindow):
             for bar, val in zip(bars, sv):
                 x_pos = bar.get_width()
                 ha = 'left' if x_pos >= 0 else 'right'
-                offset = 0.005 if x_pos >= 0 else -0.005
+                offset = 0.001 if x_pos >= 0 else -0.001
                 ax.text(x_pos + offset, bar.get_y() + bar.get_height() / 2,
                         f"{val:+.2f}", va='center', ha=ha, color='white', fontsize=10, fontweight='bold')
 
@@ -830,7 +931,7 @@ class AgriWandDashboard(QMainWindow):
             pixmap = QPixmap.fromImage(qimg)
 
             dialog = QDialog(self)
-            dialog.setWindowTitle("SHAP Feature Importance")
+            dialog.setWindowTitle("Crop Prediction Breakdown")
             dialog.setWindowState(Qt.WindowMaximized)
             dialog.setStyleSheet("background-color: #0F172A;")
             dialog.setMinimumSize(720, 460)
@@ -862,7 +963,7 @@ class AgriWandDashboard(QMainWindow):
             QMessageBox.critical(self, "SHAP Error",
                                  f"Failed to calculate SHAP values:\n{str(e)}")
         finally:
-            self.btn_shap.setText("SHAP EXPLANATION")
+            self.btn_shap.setText("PREDICTION EXPLANATION")
 
     def activate_mode_2(self):
         if not self.ui_ready or len(self.raw_data) == 0:
@@ -948,7 +1049,7 @@ class AgriWandDashboard(QMainWindow):
                     bar_color = "#10b981"
 
             # Jangan timpa teks AI jika baru saja digenerate
-            if "TOP 3 AI" not in self.lbl_insight.text():
+            if "TOP 3" not in self.lbl_insight.text():
                 self.lbl_insight.setText(insight_txt)
 
             self.progress_bar.setStyleSheet(
@@ -1037,14 +1138,9 @@ class AgriWandDashboard(QMainWindow):
 
         try:
             report_dir = "report"
-            if not os.path.exists(report_dir):
-                os.makedirs(report_dir)
+            os.makedirs(report_dir, exist_ok=True)
             path = os.path.abspath(os.path.join(
                 report_dir, datetime.now().strftime("%d-%m-%y_%H-%M") + "_TERRA-CORE.pdf"))
-
-            printer = QPrinter(QPrinter.ScreenResolution)
-            printer.setOutputFormat(QPrinter.PdfFormat)
-            printer.setOutputFileName(path)
 
             def get_b64(p):
                 return "data:image/png;base64," + base64.b64encode(open(p, "rb").read()).decode() if os.path.exists(p) else ""
@@ -1082,14 +1178,13 @@ class AgriWandDashboard(QMainWindow):
             uniformity_score = max(
                 0, 100 - (np.mean([n_std, p_std, k_std, t_std, h_std, ph_std]) * 2))
 
-            doc = QTextDocument()
             html_content = f"""
             <div style='font-family: Arial, sans-serif; color: #1e293b; line-height: 1.5;'>
                 <table width="100%" style="border-bottom: 3px solid #0ea5e9; padding-bottom: 10px; margin-bottom: 15px;">
                     <tr>
                         <td width="55%" valign="top">
                             <h1 style='color: #0ea5e9; font-size: 26pt; margin: 0; letter-spacing: 1px;'>TERRA-CORE</h1>
-                            <h2 style='color: #64748b; font-size: 14pt; margin: 5px 0 0 0;'>Enterprise Spatial Intelligence Report</h2>
+                            <h2 style='color: #64748b; font-size: 14pt; margin: 5px 0 0 0;'>Farm Health & Crop Report</h2>
                         </td>
                         <td width="45%" align="right" valign="top">
                             <div style="margin-bottom: 10px;">
@@ -1098,29 +1193,19 @@ class AgriWandDashboard(QMainWindow):
                             </div>
                             <span style="font-size: 10pt; color: #475569;"><b>Doc ID:</b> TC-RPT-{datetime.now().strftime('%y%m%d%H%M')}</span><br>
                             <span style="font-size: 10pt; color: #475569;"><b>Generated:</b> {datetime.now().strftime('%d %b %Y, %H:%M')}</span><br>
-                            <span style="font-size: 10pt; color: #475569;"><b>Dataset Ref:</b> {self.current_file_name}</span>
+                            <span style="font-size: 10pt; color: #475569;"><b>Timeline:</b> {self.current_file_name}</span>
                         </td>
                     </tr>
                 </table>
 
-                <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #8b5cf6; padding-left: 8px;'>1. Executive Summary</h3>
+                <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #8b5cf6; padding-left: 8px;'>1. Field Condition Summary</h3>
                 <p style='font-size: 11pt; text-align: justify; background-color: #f8fafc; padding: 10px; border: 1px solid #e2e8f0;'>
-                    This document presents the spatial agronomic analysis for the designated field area. The TERRA-CORE Edge AI node has processed <b>{sample_size} spatial data points</b> to evaluate field suitability for <b>{self.target_crop.upper()}</b> cultivation. The overall field status is currently flagged as <b style="color:{color_status};">{condition_status}</b>. The calculated Field Uniformity Index is approximately <b>{uniformity_score:.1f}%</b>.
+                    "This report contains the results of a land condition assessment. Our system has examined {sample_size} locations to determine 
+                    whether this land is suitable for growing {self.target_crop.upper()}. In general, the current land condition is <b style="color:{color_status};">
+                    {condition_status}</b>. The uniformity of soil conditions in the area is approximately {uniformity_score:.1f}%."
                 </p>
 
-                <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #3b82f6; padding-left: 8px;'>2. Geospatial Survey Metadata</h3>
-                <table width="100%" style="font-size: 11pt; background-color: #f0f9ff; padding: 10px; border: 1px solid #bae6fd;">
-                    <tr>
-                        <td width="50%"><b>Center Coordinate:</b> {center_lat:.6f}, {center_lng:.6f}</td>
-                        <td width="50%"><b>Data Density:</b> {sample_size} active nodes</td>
-                    </tr>
-                    <tr>
-                        <td width="50%"><b>Primary Focus Metric:</b> {conf['nama']}</td>
-                        <td width="50%"><b>Current Metric Avg:</b> {avg_val:.2f}</td>
-                    </tr>
-                </table>
-
-                <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #10b981; padding-left: 8px; margin-top: 20px;'>3. Comprehensive Soil Analytics & Variance</h3>
+                <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #10b981; padding-left: 8px; margin-top: 20px;'>2. Soil Nutrient Breakdown</h3>
                 <table width="100%" cellspacing="0" cellpadding="8" style="font-size: 10.5pt; border-collapse: collapse; border: 1px solid #cbd5e1;">
                     <tr style="background-color: #1e293b; color: white; text-align: left;">
                         <th style="border: 1px solid #cbd5e1;">Parameter</th>
@@ -1180,11 +1265,6 @@ class AgriWandDashboard(QMainWindow):
                     </tr>
                 </table>
 
-                <h3 style='color: #334155; font-size: 13pt; border-left: 4px solid #64748b; padding-left: 8px; margin-top: 20px;'>4. Spatial Methodology & Core Engine</h3>
-                <p style='font-size: 10pt; color: #475569; text-align: justify;'>
-                    The TERRA-CORE system utilizes a customized Scipy <b>Griddata Interpolation Model</b> (Linear method) paired with <b>cKDTree Spatial Hashing</b> to generate real-time topographical heatmaps. Predictive crop analytics are powered by a <b>Random Forest Classifier</b>.
-                </p>
-
                 <div style="margin-top: 30px; text-align: center; font-size: 9pt; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 10px;">
                     <b>TERRA-CORE Enterprise AI Node</b> | Developed by R2C Team - Faculty of Electronics and Computer Engineering, Satya Wacana Christian University<br>
                     <i>Generated securely via PyQt5 Print Support Engine</i>
@@ -1223,7 +1303,7 @@ class AgriWandDashboard(QMainWindow):
                     feature_names = self.last_input_features.columns.tolist()
                     feature_values = self.last_input_features.values[0]
 
-                    fig, ax = plt.subplots(figsize=(8, 4.5))
+                    fig, ax = plt.subplots(figsize=(6.5, 3.8))
                     fig.patch.set_facecolor('#0F172A')
                     ax.set_facecolor('#1E293B')
                     colors = ['#ef4444' if v < 0 else '#10b981' for v in sv]
@@ -1235,8 +1315,8 @@ class AgriWandDashboard(QMainWindow):
                         [f"{n}  ({v:.2f})" for n, v in zip(
                             feature_names, feature_values)],
                         color='white', fontsize=10)
-                    ax.set_xlabel("SHAP Value", color='#94a3b8', fontsize=9)
-                    ax.set_title(f"Feature Contributions to: {pred_crop}",
+                    ax.set_xlabel("Impact on Decision", color='#94a3b8', fontsize=9)
+                    ax.set_title(f"Why the system chose: {pred_crop}",
                                  color='#0ea5e9', fontsize=11, fontweight='bold', pad=12)
                     ax.tick_params(colors='white')
                     ax.spines[:].set_color('#334155')
@@ -1245,24 +1325,29 @@ class AgriWandDashboard(QMainWindow):
                     for bar, val in zip(bars, sv):
                         x_pos = bar.get_width()
                         ha = 'left' if x_pos >= 0 else 'right'
-                        offset = 0.005 if x_pos >= 0 else -0.005
+                        offset = 0.001 if x_pos >= 0 else -0.001
                         ax.text(x_pos + offset, bar.get_y() + bar.get_height() / 2,
                                 f"{val:+.2f}", va='center', ha=ha,
                                 color='white', fontsize=9, fontweight='bold')
                     x_min, x_max = ax.get_xlim()
-                    padding = (x_max - x_min) * 0.15
+                    padding = (x_max - x_min) * 0.12
                     ax.set_xlim(x_min - padding, x_max + padding)
-                    plt.tight_layout()
+                    plt.tight_layout(pad=1.2)
 
                     buf_shap = io.BytesIO()
-                    plt.savefig(buf_shap, format='png', dpi=120, bbox_inches='tight',
+                    plt.savefig(buf_shap, format='png', dpi=100, bbox_inches='tight',
                                 facecolor=fig.get_facecolor())
                     buf_shap.seek(0)
                     plt.close(fig)
 
                     shap_b64 = base64.b64encode(
                         buf_shap.read()).decode('utf-8')
-                    shap_img_tag = f"<img src='data:image/png;base64,{shap_b64}' width='620'/>"
+                    shap_img_tag = f'''
+                    <div style="text-align: center; margin: 15px 10px; padding: 5px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px;">
+                        <img src="data:image/png;base64,{shap_b64}" 
+                            style="max-width: 95%; height: auto; max-height: 350px; display: block; margin: 0 auto;">
+                    </div>
+                    '''
 
                 except Exception:
                     shap_img_tag = "<p style='color:red;'>SHAP chart could not be generated.</p>"
@@ -1349,18 +1434,19 @@ class AgriWandDashboard(QMainWindow):
 
             page2_html = f"""
             <div style='page-break-before: always; font-family: Arial, sans-serif;
-                        color: #1e293b; line-height: 1.5;'>
+                        color: #1e293b; line-height: 1.5; margin: 0; padding: 0;'>
 
                 <!-- Header halaman 2 -->
-                <table width="100%" style="border-bottom: 3px solid #0ea5e9; padding-bottom: 8px; margin-bottom: 15px;">
+                <table width="100%" cellpadding="0" cellspacing="0" 
+                    style="border-bottom: 3px solid #0ea5e9; padding-bottom: 8px; margin-bottom: 12px;">
                     <tr>
-                        <td>
-                            <h1 style='color: #0ea5e9; font-size: 22pt; margin:0;'>TERRA-CORE</h1>
-                            <h2 style='color: #64748b; font-size: 12pt; margin: 4px 0 0 0;'>
-                                AI Explainability &amp; Decision Support</h2>
+                        <td style="padding: 0;">
+                            <h1 style='color: #0ea5e9; font-size: 20pt; margin:0; padding:0;'>TERRA-CORE</h1>
+                            <h2 style='color: #64748b; font-size: 11pt; margin: 3px 0 0 0; padding:0;'>
+                                Explainability &amp; Decision Support</h2>
                         </td>
-                        <td align="right" valign="top">
-                            <span style="font-size:10pt; color:#475569;">
+                        <td align="right" valign="top" style="padding: 0;">
+                            <span style="font-size:9pt; color:#475569;">
                                 <b>Crop Target:</b> {self.target_crop.upper()}<br>
                                 <b>Field Status:</b> <b style="color:{color_status};">{condition_status}</b>
                             </span>
@@ -1368,110 +1454,115 @@ class AgriWandDashboard(QMainWindow):
                     </tr>
                 </table>
 
-                <!-- Seksi SHAP -->
-                <h3 style='color:#334155; font-size:13pt;
-                           border-left:4px solid #8b5cf6; padding-left:8px;'>
-                    5. AI Explainability - Feature Analysis</h3>
-                <p style='font-size:10pt; color:#475569;'>
+                <!-- Seksi SHAP dengan layout ketat -->
+                <h3 style='color:#334155; font-size:12pt; margin: 12px 0 8px 0; padding: 0;
+                        border-left:4px solid #8b5cf6; padding-left:8px;'>
+                    3. Why We Recommend {self.target_crop.upper()}</h3>
+                <p style='font-size:9.5pt; color:#475569; margin: 0 0 8px 0; padding: 0;'>
                     The chart below shows how each soil parameter contributed to
-                    (<span style='color:#10b981; font-weight:bold;'>&#x25A0; green = supports</span>) or
-                    hindered (<span style='color:#ef4444; font-weight:bold;'>&#x25A0; red = opposes</span>)
-                    the AI prediction for <b>{self.target_crop.upper()}</b>.
+                    (<span style='color:#10b981; font-weight:bold;'>green = supports</span>) or
+                    hindered (<span style='color:#ef4444; font-weight:bold;'>red = opposes</span>)
+                    the prediction for <b>{self.target_crop.upper()}</b>.
                 </p>
-                <div style='text-align:center; margin: 10px 0;'>
+                
+                <!-- Container gambar dengan constraint ukuran -->
+                <div style='text-align: center; margin: 8px 0; padding: 5px;'>
                     {shap_img_tag}
                 </div>
 
-                <!-- Seksi DSS -->
-                <h3 style='color:#334155; font-size:13pt;
-                        border-left:4px solid #f59e0b; padding-left:8px; margin-top:20px; margin-bottom:10px'>
-                    6. Decision Support System - Corrective Actions</h3>
-                <table width="100%" cellspacing="0" cellpadding="6"
-                       style="font-size:10pt; border-collapse:collapse; border:1px solid #cbd5e1;">
+                <!-- Seksi DSS dengan margin ketat -->
+                <h3 style='color:#334155; font-size:12pt; margin: 15px 0 8px 0; padding: 0;
+                        border-left:4px solid #f59e0b; padding-left:8px;'>
+                    4. Action Plan &amp; Expected Costs</h3>
+                <table width="100%" cellspacing="0" cellpadding="5"
+                    style="font-size:9.5pt; border-collapse:collapse; border:1px solid #cbd5e1; margin:0; padding:0;">
                     <tr style="background-color:#1e293b; color:white; text-align:left;">
-                        <th style="border:1px solid #cbd5e1; padding:8px; width:18%;">Parameter</th>
-                        <th style="border:1px solid #cbd5e1; padding:8px; width:12%;">Current Avg</th>
-                        <th style="border:1px solid #cbd5e1; padding:8px; width:16%;">Optimal Range</th>
-                        <th style="border:1px solid #cbd5e1; padding:8px; width:14%;">Status</th>
-                        <th style="border:1px solid #cbd5e1; padding:8px; width:33%">Recommended Action</th>
-                        <th style="border:1px solid #cbd5e1; padding:8px; width:15%;">Est. Cost/Ha</th> </tr>
+                        <th style="border:1px solid #cbd5e1; padding:6px; width:16%; font-size:9pt;">Parameter</th>
+                        <th style="border:1px solid #cbd5e1; padding:6px; width:10%; font-size:9pt;">Current</th>
+                        <th style="border:1px solid #cbd5e1; padding:6px; width:12%; font-size:9pt;">Optimal Range</th>
+                        <th style="border:1px solid #cbd5e1; padding:6px; width:10%; font-size:9pt;">Status</th>
+                        <th style="border:1px solid #cbd5e1; padding:6px; width:34%; font-size:9pt;">Action</th>
+                        <th style="border:1px solid #cbd5e1; padding:6px; width:13%; font-size:9pt;">Cost/Ha</th>
+                    </tr>
                     {dss_rows}
                 </table>
 
-                <!-- Footer -->
-                <div style="margin-top:30px; text-align:center; font-size:9pt;
-                            color:#94a3b8; border-top:1px solid #e2e8f0; padding-top:10px;">
-                    <b>TERRA-CORE Enterprise AI Node</b> | R2C Team - UKSW<br>
+                <!-- Footer dengan spacing minimal -->
+                <div style="margin-top:15px; text-align:center; font-size:8.5pt;
+                            color:#94a3b8; border-top:1px solid #e2e8f0; padding-top:8px;">
+                    <b>TERRA-CORE Enterprise AI Node</b> | R2C Team - UKSW
                 </div>
 
             </div>
             """
-
-            doc.setHtml(html_content + page2_html)
-            doc.print_(printer)
-
-            # --- PROSES UPLOAD DAN GENERATE QR ---
-            # Tampilkan pesan loading sementara (karena upload butuh waktu beberapa detik)
-            self.statusBar().showMessage("Uploading a PDF to the web server...")
-            QApplication.processEvents()  # Memaksa UI memperbarui status bar
-
-            # 1. Panggil fungsi upload
-            public_url = upload_pdf_to_web(path)
-
-            self.statusBar().clearMessage()
-
-            if public_url:
-                # 2. Generate QR Code dari URL Publik
-                qr = qrcode.QRCode(version=1, box_size=8, border=2)
-                qr.add_data(public_url)
-                qr.make(fit=True)
-                img = qr.make_image(fill_color="#0F172A", back_color="white")
-
-                buf = BytesIO()
-                img.save(buf, format="PNG")
-                qimg = QImage.fromData(buf.getvalue())
-                pixmap = QPixmap.fromImage(qimg)
-
-                # 3. Tampilkan Dialog QR
-                qr_dialog = QDialog(self)
-                qr_dialog.setWindowTitle("PDF Uploaded Successfully")
-                qr_dialog.setStyleSheet(
-                    "background-color: #0F172A; color: white;")
-                qr_layout = QVBoxLayout(qr_dialog)
-
-                lbl_title = QLabel("SCAN TO DOWNLOAD PDF")
-                lbl_title.setStyleSheet(
-                    "font-size: 16px; font-weight: bold; color: #10b981;")
-                lbl_title.setAlignment(Qt.AlignCenter)
-                qr_layout.addWidget(lbl_title)
-
-                lbl_qr = QLabel()
-                lbl_qr.setPixmap(pixmap)
-                lbl_qr.setAlignment(Qt.AlignCenter)
-                lbl_qr.setStyleSheet(
-                    "background-color: white; padding: 10px; border-radius: 8px;")
-                qr_layout.addWidget(lbl_qr)
-
-                lbl_url = QLabel(f"Or click the following link:\n{public_url}")
-                lbl_url.setStyleSheet(
-                    "color: #64748b; font-size: 11px; margin-top: 5px;")
-                lbl_url.setAlignment(Qt.AlignCenter)
-                qr_layout.addWidget(lbl_url)
-
-                btn_close = QPushButton("TUTUP")
-                btn_close.setStyleSheet(
-                    "background-color: #0ea5e9; font-weight: bold; padding: 10px; border-radius: 6px;")
-                btn_close.clicked.connect(qr_dialog.accept)
-                qr_layout.addWidget(btn_close)
-
-                qr_dialog.exec_()
-            else:
-                QMessageBox.warning(
-                    self, "Upload Failed", "Make sure the Raspberry Pi is connected to Wi-Fi with internet access.")
+            
+            self.statusBar().showMessage("Exporting PDF... please wait.")
+            self._export_worker = ExportWorker(html_content, page2_html, path)
+            self._export_worker.progress_msg.connect(self.statusBar().showMessage)
+            self._export_worker.export_done.connect(self._on_export_done)
+            self._export_worker.export_error.connect(self._on_export_error)
+            self._export_worker.start()
 
         except Exception as e:
             QMessageBox.critical(
-                self, "Export Failed", f"An error occurred while generating PDF:\n{str(e)}")
+                self, "Export Failed", f"An error occurred while preparing PDF:\n{str(e)}")
+        
+    def _on_export_done(self, pdf_path, public_url):
+        """Dipanggil dari main thread setelah worker selesai."""
+        self.statusBar().clearMessage()
+
+        if not public_url:
+            QMessageBox.warning(self, "Upload Failed",
+                                "Make sure the Raspberry Pi is connected to Wi-Fi with internet access.")
+            return
+
+        # Generate QR Code
+        qr = qrcode.QRCode(version=1, box_size=8, border=2)
+        qr.add_data(public_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="#0F172A", back_color="white")
+
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        qimg   = QImage.fromData(buf.getvalue())
+        pixmap = QPixmap.fromImage(qimg)
+
+        # Tampilkan dialog QR
+        qr_dialog = QDialog(self)
+        qr_dialog.setWindowTitle("PDF Uploaded Successfully")
+        qr_dialog.setStyleSheet("background-color: #0F172A; color: white;")
+        qr_layout = QVBoxLayout(qr_dialog)
+
+        lbl_title = QLabel("SCAN TO DOWNLOAD PDF")
+        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #10b981;")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        qr_layout.addWidget(lbl_title)
+
+        lbl_qr = QLabel()
+        lbl_qr.setPixmap(pixmap)
+        lbl_qr.setAlignment(Qt.AlignCenter)
+        lbl_qr.setStyleSheet("background-color: white; padding: 10px; border-radius: 8px;")
+        qr_layout.addWidget(lbl_qr)
+
+        lbl_url = QLabel(f"Or click the following link:\n{public_url}")
+        lbl_url.setStyleSheet("color: #64748b; font-size: 11px; margin-top: 5px;")
+        lbl_url.setAlignment(Qt.AlignCenter)
+        qr_layout.addWidget(lbl_url)
+
+        btn_close = QPushButton("TUTUP")
+        btn_close.setStyleSheet(
+            "background-color: #0ea5e9; font-weight: bold; padding: 10px; border-radius: 6px;")
+        btn_close.clicked.connect(qr_dialog.accept)
+        qr_layout.addWidget(btn_close)
+
+        qr_dialog.exec_()
+
+
+    def _on_export_error(self, error_msg):
+        """Dipanggil dari main thread jika worker gagal."""
+        self.statusBar().clearMessage()
+        QMessageBox.critical(self, "Export Failed",
+                            f"An error occurred while generating PDF:\n{error_msg}")
 
 
 if __name__ == "__main__":
